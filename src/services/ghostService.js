@@ -454,7 +454,7 @@ export const uploadImage = async (imageUri, filename, purpose = 'image') => {
  * @param {string} mediaUri - Local media URI
  * @param {string} filename - Desired filename
  */
-export const uploadMedia = async (mediaUri, filename) => {
+export const uploadMedia = async (mediaUri, filename, explicitMimeType = null) => {
   const token = await getToken();
   const baseUrl = await getGhostApiUrl();
 
@@ -468,8 +468,11 @@ export const uploadMedia = async (mediaUri, filename) => {
     wav: 'audio/wav',
     ogg: 'audio/ogg',
     m4a: 'audio/mp4',
+    mov: 'video/quicktime',
+    m4v: 'video/mp4',
+    aac: 'audio/aac',
   };
-  const mimeType = mimeTypes[ext] || 'video/mp4';
+  const mimeType = explicitMimeType || mimeTypes[ext] || 'video/mp4';
 
   const formData = new FormData();
   formData.append('file', {
@@ -497,6 +500,47 @@ export const uploadMedia = async (mediaUri, filename) => {
   return {
     success: true,
     url: data.media[0].url,
+  };
+};
+
+/**
+ * Upload an arbitrary file (PDF, document, archive...) to Ghost.
+ * Uses the Admin API files endpoint (Ghost 5+), which backs the File card.
+ *
+ * @param {string} fileUri - Local file URI
+ * @param {string} filename - Desired filename
+ * @param {string} mimeType - MIME type of the file
+ */
+export const uploadFile = async (fileUri, filename, mimeType = 'application/octet-stream') => {
+  const token = await getToken();
+  const baseUrl = await getGhostApiUrl();
+
+  const formData = new FormData();
+  formData.append('file', {
+    uri: fileUri,
+    type: mimeType,
+    name: filename || 'file',
+  });
+
+  const response = await fetch(`${baseUrl}/ghost/api/admin/files/upload/`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Ghost ${token}`,
+      'Accept-Version': 'v5.0',
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.errors?.[0]?.message || 'Failed to upload file');
+  }
+
+  const data = await response.json();
+
+  return {
+    success: true,
+    url: data.files[0].url,
   };
 };
 

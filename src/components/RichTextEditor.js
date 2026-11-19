@@ -26,6 +26,7 @@ import {
   formatFileSize,
   processClipboardImage,
 } from '../services/imageService';
+import { uploadMediaToPlatform } from '../services/api';
 
 const RichTextEditor = ({
   initialContent = '',
@@ -42,31 +43,92 @@ const RichTextEditor = ({
     }
   }, [onContentChange]);
 
+  const [uploadLabel, setUploadLabel] = useState('');
+
+  const FONT = "-apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif";
+
+  const escapeHtml = (str = '') =>
+    String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  const filenameFromUri = (uri, fallback) => {
+    const last = (uri || '').split('/').pop()?.split('?')[0];
+    return last && last.includes('.') ? decodeURIComponent(last) : fallback;
+  };
+
+  /**
+   * Upload a local file to the connected blog and return its public URL.
+   * Runs with a visible progress overlay so the user knows what is happening.
+   */
+  const uploadWithProgress = useCallback(async (uri, filename, mediaType, mimeType, label) => {
+    setUploadLabel(label);
+    setIsProcessingImage(true);
+    try {
+      const result = await uploadMediaToPlatform(uri, filename, mediaType, mimeType);
+      if (!result?.url) throw new Error('Upload did not return a URL');
+      return result.url;
+    } finally {
+      setIsProcessingImage(false);
+      setUploadLabel('');
+    }
+  }, []);
+
   const insertImage = useCallback(async (imageData) => {
     if (!imageData || !richText.current) return;
 
-    setIsProcessingImage(true);
+    let src;
     try {
-      const base64 = await imageToBase64(imageData.uri);
-      // Smart Block with Caption - Using standard figure/figcaption
+      src = await uploadWithProgress(
+        imageData.uri,
+        filenameFromUri(imageData.uri, `image-${Date.now()}.jpg`),
+        'image',
+        imageData.type || 'image/jpeg',
+        'Uploading image…'
+      );
+    } catch (error) {
+      // Offline or blog not configured: keep writing, embed locally for now.
+      console.warn('Image upload failed, embedding inline:', error?.message);
+      try {
+        src = await imageToBase64(imageData.uri);
+      } catch (e) {
+        Alert.alert('Error', 'Failed to insert image');
+        return;
+      }
+      Alert.alert(
+        'Image embedded offline',
+        `Could not upload to your blog (${error?.message || 'unknown error'}). The image is embedded in the post instead; you can re-insert it once you are online.`
+      );
+    }
+
+    const html = `
+      <figure class="kg-card kg-image-card kg-card-hascaption" style="margin: 24px 0; text-align: center;">
+        <img class="kg-image" src="${src}" style="width: 100%; border-radius: 12px; display: block;" />
+        <figcaption style="margin-top: 12px; font-size: 14px; color: #8E8E93; font-family: ${FONT};">Add a caption...</figcaption>
+      </figure>
+      <p><br/></p>
+    `;
+    richText.current.insertHTML(html);
+  }, [uploadWithProgress]);
+
+  const insertVideo = useCallback(async (asset) => {
+    if (!asset?.uri) return;
+    try {
+      const filename = asset.fileName || filenameFromUri(asset.uri, `video-${Date.now()}.mp4`);
+      const url = await uploadWithProgress(asset.uri, filename, 'video', asset.mimeType, 'Uploading video…');
       const html = `
-        <figure class="smart-block" style="margin: 24px 0; text-align: center;">
-          <img src="${base64}" style="width: 100%; border-radius: 12px; display: block;" />
-          <figcaption style="margin-top: 12px; font-size: 14px; color: #8E8E93; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif;">Add a caption...</figcaption>
+        <figure class="kg-card kg-video-card" style="margin: 24px 0;">
+          <video src="${url}" controls playsinline preload="metadata" style="width: 100%; border-radius: 12px; background: #000;"></video>
         </figure>
         <p><br/></p>
       `;
-      richText.current.insertHTML(html);
-
-      const sizeInfo = formatFileSize(imageData.size);
-      console.log(`Image inserted: ${sizeInfo}${imageData.wasCompressed ? ' (compressed)' : ''}`);
+      richText.current?.insertHTML(html);
     } catch (error) {
-      Alert.alert('Error', 'Failed to insert image');
-      console.error('Error inserting image:', error);
-    } finally {
-      setIsProcessingImage(false);
+      Alert.alert('Video upload failed', error?.message || 'Please check your connection and blog settings.');
     }
-  }, []);
+  }, [uploadWithProgress]);
 
   const handlePickVideoFromLibrary = useCallback(async () => {
     try {
@@ -83,22 +145,13 @@ const RichTextEditor = ({
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        // For now, insert a placeholder until we implement actual video upload
-        const html = `
-          <div class="smart-block video-block" style="margin: 24px 0; background-color: #F2F2F7; border-radius: 12px; padding: 32px; text-align: center; border: 1px dashed #C7C7CC;">
-            <span style="font-size: 24px; display: block; margin-bottom: 8px;">▶️</span>
-            <span style="color: #8E8E93; font-weight: 500; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif;">Video selected: ${asset.duration ? `${Math.round(asset.duration / 1000)}s` : 'N/A'}</span>
-          </div>
-          <p><br/></p>
-        `;
-        richText.current?.insertHTML(html);
+        await insertVideo(result.assets[0]);
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to pick video from gallery');
       console.error('Video picker error:', error);
     }
-  }, []);
+  }, [insertVideo]);
 
   const handleRecordVideo = useCallback(async () => {
     try {
@@ -115,22 +168,13 @@ const RichTextEditor = ({
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        // For now, insert a placeholder until we implement actual video upload
-        const html = `
-          <div class="smart-block video-block" style="margin: 24px 0; background-color: #F2F2F7; border-radius: 12px; padding: 32px; text-align: center; border: 1px dashed #C7C7CC;">
-            <span style="font-size: 24px; display: block; margin-bottom: 8px;">▶️</span>
-            <span style="color: #8E8E93; font-weight: 500; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif;">Video recorded: ${asset.duration ? `${Math.round(asset.duration / 1000)}s` : 'N/A'}</span>
-          </div>
-          <p><br/></p>
-        `;
-        richText.current?.insertHTML(html);
+        await insertVideo(result.assets[0]);
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to record video');
       console.error('Video recording error:', error);
     }
-  }, []);
+  }, [insertVideo]);
 
   const showVideoOptions = useCallback(() => {
     Alert.alert(
@@ -144,6 +188,30 @@ const RichTextEditor = ({
     );
   }, [handlePickVideoFromLibrary, handleRecordVideo]);
 
+  const handlePickAudio = useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'audio/*',
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled || !result.assets?.length) return;
+
+      const audio = result.assets[0];
+      const url = await uploadWithProgress(audio.uri, audio.name, 'audio', audio.mimeType, 'Uploading audio…');
+      const html = `
+        <figure class="kg-card kg-audio-card" style="margin: 24px 0; background-color: #F2F2F7; border-radius: 12px; padding: 16px;">
+          <div style="font-weight: 600; margin-bottom: 8px; font-family: ${FONT};">${escapeHtml(audio.name)}</div>
+          <audio src="${url}" controls preload="metadata" style="width: 100%;"></audio>
+        </figure>
+        <p><br/></p>
+      `;
+      richText.current?.insertHTML(html);
+    } catch (error) {
+      Alert.alert('Audio upload failed', error?.message || 'Please check your connection and blog settings.');
+    }
+  }, [uploadWithProgress]);
+
   const handlePickDocument = useCallback(async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -152,29 +220,26 @@ const RichTextEditor = ({
         multiple: false,
       });
 
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const doc = result.assets[0];
-        // Insert document as a styled link/attachment block
-        const fileSize = doc.size ? formatFileSize(doc.size) : 'Unknown size';
-        const html = `
-          <div class="smart-block document-block" style="margin: 24px 0; background-color: #F2F2F7; border-radius: 12px; padding: 16px; border: 1px solid #E5E5EA;">
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <span style="font-size: 32px;">📎</span>
-              <div style="flex: 1;">
-                <div style="font-weight: 600; color: #000; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif; margin-bottom: 4px;">${doc.name}</div>
-                <div style="font-size: 13px; color: #8E8E93; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Roboto', sans-serif;">${doc.mimeType || 'Document'} • ${fileSize}</div>
-              </div>
-            </div>
-          </div>
-          <p><br/></p>
-        `;
-        richText.current?.insertHTML(html);
-      }
+      if (result.canceled || !result.assets?.length) return;
+
+      const doc = result.assets[0];
+      const url = await uploadWithProgress(doc.uri, doc.name, 'file', doc.mimeType, 'Uploading file…');
+      const fileSize = doc.size ? formatFileSize(doc.size) : '';
+      const html = `
+        <div class="kg-card kg-file-card" style="margin: 24px 0; background-color: #F2F2F7; border-radius: 12px; padding: 16px; border: 1px solid #E5E5EA;">
+          <a class="kg-file-card-container" href="${url}" download style="text-decoration: none; color: inherit; display: block;">
+            <div style="font-weight: 600; color: #000; font-family: ${FONT}; margin-bottom: 4px;">📎 ${escapeHtml(doc.name)}</div>
+            <div style="font-size: 13px; color: #8E8E93; font-family: ${FONT};">${escapeHtml(doc.mimeType || 'File')}${fileSize ? ` • ${fileSize}` : ''}</div>
+          </a>
+        </div>
+        <p><br/></p>
+      `;
+      richText.current?.insertHTML(html);
     } catch (error) {
-      Alert.alert('Error', 'Failed to pick document');
+      Alert.alert('File upload failed', error?.message || 'Please check your connection and blog settings.');
       console.error('Document picker error:', error);
     }
-  }, []);
+  }, [uploadWithProgress]);
 
   const handlePickImage = useCallback(async () => {
     try {
@@ -351,6 +416,7 @@ const RichTextEditor = ({
             'separator',
             'image',
             'video',
+            'audio',
             'document'
           ]}
           iconMap={{
@@ -359,7 +425,7 @@ const RichTextEditor = ({
             [actions.setItalic]: () => <Text style={[styles.formatIcon, { fontStyle: 'italic' }]}>I</Text>,
             'separator': () => <View style={styles.separator} />,
             'image': () => (
-              <TouchableOpacity onPress={handlePickImage} style={styles.mediaButton}>
+              <TouchableOpacity onPress={showImageOptions} style={styles.mediaButton}>
                 <Ionicons name="image-outline" size={24} color={colors.text.primary} />
               </TouchableOpacity>
             ),
@@ -368,15 +434,29 @@ const RichTextEditor = ({
                 <Ionicons name="videocam-outline" size={24} color={colors.text.primary} />
               </TouchableOpacity>
             ),
+            'audio': () => (
+              <TouchableOpacity onPress={handlePickAudio} style={styles.mediaButton}>
+                <Ionicons name="musical-notes-outline" size={24} color={colors.text.primary} />
+              </TouchableOpacity>
+            ),
             'document': () => (
               <TouchableOpacity onPress={handlePickDocument} style={styles.mediaButton}>
                 <Ionicons name="attach-outline" size={24} color={colors.text.primary} />
               </TouchableOpacity>
             )
           }}
-          onPressAddImage={handlePickImage}
+          onPressAddImage={showImageOptions}
         />
       </View>
+
+      {isProcessingImage && (
+        <View style={styles.uploadOverlay} pointerEvents="auto">
+          <View style={styles.uploadPill}>
+            <ActivityIndicator size="small" color={colors.text.inverse} />
+            <Text style={styles.uploadText}>{uploadLabel || 'Processing…'}</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 };
@@ -418,6 +498,26 @@ const styles = StyleSheet.create({
     padding: 4,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  uploadOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  uploadPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 999,
+  },
+  uploadText: {
+    color: colors.text.inverse,
+    fontSize: 15,
+    fontWeight: '600',
   },
   separator: {
     width: 1,

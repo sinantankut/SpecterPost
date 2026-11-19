@@ -18,6 +18,7 @@ import {
   deletePost,
   uploadImage,
   uploadMedia,
+  uploadFile,
   testConnection,
   clearTokenCache,
   fetchTags,
@@ -194,8 +195,8 @@ export const createPostOnPlatform = async (title, content, status = 'draft', opt
   if (options.feature_image && (options.feature_image.startsWith('file://') || options.feature_image.startsWith('content://'))) {
     try {
       const filename = options.feature_image.split('/').pop() || 'featured-image.jpg';
-      const uploadedUrl = await uploadImage(options.feature_image, filename);
-      options.feature_image = uploadedUrl;
+      const uploaded = await uploadImage(options.feature_image, filename);
+      options.feature_image = uploaded.url;
     } catch (error) {
       console.error('Failed to auto-upload featured image:', error);
       // Continue without image or throw? 
@@ -223,8 +224,8 @@ export const updatePostOnPlatform = async (postId, updates) => {
   if (updates.feature_image && (updates.feature_image.startsWith('file://') || updates.feature_image.startsWith('content://'))) {
     try {
       const filename = updates.feature_image.split('/').pop() || 'featured-image.jpg';
-      const uploadedUrl = await uploadImage(updates.feature_image, filename);
-      updates.feature_image = uploadedUrl;
+      const uploaded = await uploadImage(updates.feature_image, filename);
+      updates.feature_image = uploaded.url;
     } catch (error) {
       console.error('Failed to auto-upload featured image:', error);
     }
@@ -252,16 +253,19 @@ export const deletePostFromPlatform = async (postId) => {
  * @param {string} filename - Desired filename
  * @param {string} mediaType - 'image' or 'video' (for Ghost)
  */
-export const uploadMediaToPlatform = async (mediaUri, filename, mediaType = 'image') => {
+export const uploadMediaToPlatform = async (mediaUri, filename, mediaType = 'image', mimeType = null) => {
   const platform = await getActivePlatform();
 
   if (platform === 'wordpress') {
-    return wordpressService.uploadMedia(mediaUri, filename);
+    return wordpressService.uploadMedia(mediaUri, filename, mimeType || 'image/jpeg');
   }
 
-  // Ghost has separate endpoints for images vs media
+  // Ghost has separate endpoints for images, video/audio, and other files
   if (mediaType === 'video' || mediaType === 'audio') {
-    return uploadMedia(mediaUri, filename);
+    return uploadMedia(mediaUri, filename, mimeType);
+  }
+  if (mediaType === 'file') {
+    return uploadFile(mediaUri, filename, mimeType || 'application/octet-stream');
   }
 
   return uploadImage(mediaUri, filename);
