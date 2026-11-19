@@ -5,12 +5,12 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#F4F3F0"
     },
     "ios": {
       "supportsTablet": true
@@ -18,17 +18,35 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#F4F3F0"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.SpecterPost"
+      "package": "com.anonymous.SpecterPost",
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "react-native-compressor",
-      "expo-sqlite"
-    ]
+      "expo-sqlite",
+      "expo-font",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "SpecterPost needs your photos to add images and video to posts.",
+          "cameraPermission": "SpecterPost uses the camera to take photos and video for posts.",
+          "microphonePermission": "SpecterPost records sound with videos you shoot for posts."
+        }
+      ]
+    ],
+    "backgroundColor": "#F4F3F0"
   }
 }

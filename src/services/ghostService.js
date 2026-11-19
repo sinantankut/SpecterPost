@@ -346,6 +346,7 @@ export const updatePost = async (postId, updates = {}) => {
   if (updates.canonical_url !== undefined) postData.canonical_url = updates.canonical_url;
   if (updates.meta_title !== undefined) postData.meta_title = updates.meta_title;
   if (updates.meta_description !== undefined) postData.meta_description = updates.meta_description;
+  if (updates.published_at !== undefined) postData.published_at = updates.published_at;
 
   // Handle tags
   if (updates.tags !== undefined) {
