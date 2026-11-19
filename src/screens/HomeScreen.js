@@ -1,501 +1,293 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
-  SectionList,
-  StyleSheet,
-  TouchableOpacity,
+  FlatList,
+  Pressable,
   RefreshControl,
   ActivityIndicator,
-  ImageBackground,
-  Platform,
+  Image,
+  Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { colors, typography, spacing, borderRadius, shadows } from '../constants/theme';
-import { Card } from '../components/Card';
-import { fetchGhostPosts } from '../services/api';
-import { hasGhostCredentials, getDrafts } from '../services/storage';
+import { useTheme, type, space, radius } from '../theme';
+import { Title, Label, Button, IconButton, Tabs, Callout, tap } from '../ui';
+import { fetchGhostPosts, getGhostSiteInfo } from '../services/api';
+import { hasGhostCredentials, getDrafts, deleteDraft } from '../services/storage';
+
+const stripHtml = (html = '') =>
+  html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+
+const relativeDate = (iso) => {
+  if (!iso) return '';
+  const date = new Date(iso);
+  const diffMin = (Date.now() - date.getTime()) / 60000;
+  if (diffMin < 0) {
+    return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${Math.floor(diffMin)} min ago`;
+  if (diffMin < 60 * 24) return `${Math.floor(diffMin / 60)} h ago`;
+  if (diffMin < 60 * 24 * 7) return `${Math.floor(diffMin / 1440)} d ago`;
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+};
 
 export const HomeScreen = ({ navigation }) => {
-  const [sections, setSections] = useState([]);
+  const t = useTheme();
+  const insets = useSafeAreaInsets();
+  const [tab, setTab] = useState('drafts');
+  const [localDrafts, setLocalDrafts] = useState([]);
+  const [remotePosts, setRemotePosts] = useState([]);
+  const [site, setSite] = useState(null);
+  const [connected, setConnected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [hasCredentials, setHasCredentials] = useState(false);
 
-  const loadData = async (showRefresh = false) => {
-    if (showRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
+  const load = useCallback(async (isRefresh = false) => {
+    isRefresh ? setRefreshing(true) : setLoading(true);
     setError(null);
-
     try {
-      const hasConfig = await hasGhostCredentials();
-      setHasCredentials(hasConfig);
+      const drafts = await getDrafts();
+      setLocalDrafts(drafts.map((d) => ({ ...d, isLocal: true, status: 'local' })));
 
-      // Fetch Local Drafts
-      const localDrafts = await getDrafts();
-      const draftsSection = {
-        title: 'Drafts',
-        data: localDrafts.map(d => ({ ...d, isLocal: true, status: 'draft' })),
-      };
-
-      // Fetch Published Posts (if configured)
-      let publishedSection = { title: 'Published', data: [] };
-      if (hasConfig) {
-        const result = await fetchGhostPosts({ limit: 20, status: 'all' });
-        if (result.posts) {
-          publishedSection.data = result.posts.map(p => ({ ...p, isLocal: false }));
-        }
+      const hasCreds = await hasGhostCredentials();
+      setConnected(hasCreds);
+      if (hasCreds) {
+        const [postsResult, siteResult] = await Promise.all([
+          fetchGhostPosts({ limit: 50, status: 'all' }),
+          getGhostSiteInfo().catch(() => null),
+        ]);
+        setRemotePosts((postsResult?.posts || []).map((p) => ({ ...p, isLocal: false })));
+        if (siteResult?.success) setSite(siteResult.site);
+      } else {
+        setRemotePosts([]);
       }
-
-      // Combine sections (only include if having data or always? Specter shows headers usually)
-      const newSections = [];
-      if (draftsSection.data.length > 0) newSections.push(draftsSection);
-      if (publishedSection.data.length > 0) newSections.push(publishedSection);
-
-      setSections(newSections);
     } catch (err) {
-      console.error('Error loading data:', err);
-      // Keep existing data if fail? Or show error.
-      // If we have drafts but API failed, show drafts and error toast?
-      // For now just set state.
-      setError(err.message);
+      setError(err.message || 'Could not reach your blog');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [])
+      load();
+    }, [load])
   );
 
-  const formatDate = (dateString) => {
-    if (!dateString) return '';
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffInHours = (now - date) / (1000 * 60 * 60);
-
-    if (diffInHours < 24) {
-      return `${Math.floor(diffInHours)}h ago`;
-    } else if (diffInHours < 168) {
-      return `${Math.floor(diffInHours / 24)}d ago`;
-    } else {
-      return date.toLocaleDateString();
-    }
-  };
-
-  const getStatusColor = (item) => {
-    // Local drafts are always orange-ish
-    if (item.isLocal) return colors.warning || '#F59E0B';
-
-    switch (item.status) {
-      case 'published':
-        return colors.success || '#22C55E';
-      case 'draft':
-        return colors.warning || '#F59E0B';
-      case 'scheduled':
-        return colors.info || '#3B82F6';
-      default:
-        return colors.text.tertiary;
-    }
-  };
-
-  const renderPost = ({ item }) => {
-    const hasFeaturedImage = item.feature_image || item.featured_image;
-
-    // Navigation handler
-    const handlePress = () => {
-      if (item.isLocal) {
-        navigation.navigate('Editor', { draftId: item.id });
-      } else {
-        navigation.navigate('Editor', { ghostPostId: item.id, ghostPost: item });
-      }
+  const lists = useMemo(() => {
+    // A local draft linked to a remote post replaces it in the Drafts tab.
+    const linkedIds = new Set(localDrafts.map((d) => d.ghost_post_id).filter(Boolean));
+    return {
+      drafts: [
+        ...localDrafts,
+        ...remotePosts.filter((p) => p.status === 'draft' && !linkedIds.has(p.id)),
+      ].sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0)),
+      scheduled: remotePosts.filter((p) => p.status === 'scheduled'),
+      published: remotePosts.filter((p) => p.status === 'published' || p.status === 'sent'),
     };
+  }, [localDrafts, remotePosts]);
 
-    if (hasFeaturedImage) {
-      return (
-        <TouchableOpacity
-          style={styles.featuredPostCard}
-          onPress={handlePress}
-          activeOpacity={0.9}
-        >
-          <ImageBackground
-            source={{ uri: hasFeaturedImage }}
-            style={styles.featuredImageBackground}
-            imageStyle={styles.featuredImageStyle}
-            resizeMode="cover"
-          >
-            <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.85)']}
-              locations={[0, 0.6, 1]}
-              style={styles.featuredOverlay}
-            >
-              <View style={styles.featuredContent}>
-                <View style={styles.postMeta}>
-                  <View style={[styles.statusBadge, styles.statusBadgeFeatured]}>
-                    <View style={[styles.statusDot, { backgroundColor: getStatusColor(item) }]} />
-                    <Text style={[styles.statusText, { color: getStatusColor(item) }]}>
-                      {item.isLocal ? 'Local Draft' : item.status}
-                    </Text>
-                  </View>
-                  <Text style={styles.postDateFeatured}>{formatDate(item.updated_at || item.created_at || item.updatedAt)}</Text>
-                </View>
-                <Text style={styles.postTitleFeatured} numberOfLines={2}>
-                  {item.title || 'Untitled'}
-                </Text>
-                {item.excerpt || item.custom_excerpt ? (
-                  <Text style={styles.postExcerptFeatured} numberOfLines={2}>
-                    {item.custom_excerpt || item.excerpt}
-                  </Text>
-                ) : null}
-              </View>
-              <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.8)" />
-            </LinearGradient>
-          </ImageBackground>
-        </TouchableOpacity>
-      );
-    }
+  const open = (item) => {
+    if (item.isLocal) navigation.navigate('Editor', { draftId: item.id });
+    else navigation.navigate('Editor', { ghostPostId: item.id, ghostPost: item });
+  };
 
+  const confirmDeleteLocal = (item) => {
+    if (!item.isLocal) return;
+    Alert.alert('Delete this local draft?', item.title || 'Untitled', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          await deleteDraft(item.id);
+          load(true);
+        },
+      },
+    ]);
+  };
+
+  const statusLabel = (item) => {
+    if (item.isLocal) return item.ghost_post_id ? 'Unsaved edits' : 'On this phone';
+    if (item.status === 'scheduled') return `Scheduled · ${relativeDate(item.published_at)}`;
+    if (item.status === 'published' || item.status === 'sent') return `Published · ${relativeDate(item.published_at)}`;
+    return 'Draft on site';
+  };
+
+  const renderItem = ({ item, index }) => {
+    const cover = item.feature_image || item.featured_image;
+    const excerpt = item.custom_excerpt || item.excerpt || stripHtml(item.content || item.html || '');
+    const statusColor = item.isLocal ? t.amber : item.status === 'published' ? t.moss : item.status === 'scheduled' ? t.dusk : t.inkMuted;
     return (
-      <Card
-        style={styles.postCard}
-        onPress={handlePress}
+      <Pressable
+        onPress={() => {
+          tap();
+          open(item);
+        }}
+        onLongPress={() => confirmDeleteLocal(item)}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          gap: space[4],
+          paddingVertical: space[4],
+          paddingHorizontal: space[4],
+          backgroundColor: pressed ? t.paperSunken : 'transparent',
+          borderTopWidth: index === 0 ? 0 : 1,
+          borderTopColor: t.rule,
+        })}
       >
-        <View style={styles.postHeader}>
-          <View style={styles.postContent}>
-            <View style={styles.postMeta}>
-              <View style={[styles.statusBadge, { backgroundColor: `${getStatusColor(item)}20` }]}>
-                <View style={[styles.statusDot, { backgroundColor: getStatusColor(item) }]} />
-                <Text style={[styles.statusText, { color: getStatusColor(item) }]}>
-                  {item.isLocal ? 'Local Draft' : item.status}
-                </Text>
-              </View>
-              <Text style={styles.postDate}>{formatDate(item.updated_at || item.created_at || item.updatedAt)}</Text>
-            </View>
-            <Text style={styles.postTitle} numberOfLines={2}>
-              {item.title || 'Untitled'}
+        <View style={{ flex: 1, gap: space[1] }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space[2] }}>
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: statusColor }} />
+            <Text style={[type.label, { color: t.inkMuted, fontSize: 11 }]} numberOfLines={1}>
+              {statusLabel(item)}
             </Text>
-            {(item.excerpt || item.custom_excerpt) ? (
-              <Text style={styles.postExcerpt} numberOfLines={2}>
-                {item.custom_excerpt || item.excerpt}
-              </Text>
-            ) : null}
           </View>
-          <Ionicons name="chevron-forward" size={20} color={colors.text.tertiary} />
+          <Text style={[type.titleS, { color: t.ink }]} numberOfLines={2}>
+            {item.title || 'Untitled'}
+          </Text>
+          {excerpt ? (
+            <Text style={[type.body, { color: t.inkMuted, fontSize: 15, lineHeight: 22 }]} numberOfLines={2}>
+              {excerpt}
+            </Text>
+          ) : null}
+          <Text style={[type.caption, { color: t.inkFaint }]}>
+            Edited {relativeDate(item.updated_at || item.updatedAt)}
+            {item.reading_time ? ` · ${item.reading_time} min read` : ''}
+          </Text>
         </View>
-      </Card>
+        {cover ? (
+          <Image
+            source={{ uri: cover }}
+            style={{ width: 84, height: 84, borderRadius: radius.none, backgroundColor: t.paperSunken }}
+          />
+        ) : null}
+      </Pressable>
     );
   };
 
-  const renderSectionHeader = ({ section: { title } }) => (
-    <View style={styles.sectionHeader}>
-      <Text style={styles.sectionHeaderText}>{title}</Text>
-    </View>
-  );
+  const data = lists[tab] || [];
 
-  const renderEmptyState = () => {
+  const empty = () => {
     if (loading) return null;
-
-    if (!hasCredentials && sections.length === 0) {
+    if (connected === false && tab !== 'drafts') {
       return (
-        <View style={styles.emptyState}>
-          <View style={styles.emptyIconContainer}>
-            <Ionicons name="cloud-offline-outline" size={48} color={colors.text.tertiary} />
-          </View>
-          <Text style={styles.emptyTitle}>Connect Your Blog</Text>
-          <Text style={styles.emptySubtitle}>
-            Configure Ghost or WordPress to see published posts
-          </Text>
-          <TouchableOpacity
-            style={styles.configureButton}
-            onPress={() => navigation.navigate('Settings')}
-          >
-            <Ionicons name="settings-outline" size={18} color={colors.accent} />
-            <Text style={styles.configureButtonText}>Configure Settings</Text>
-          </TouchableOpacity>
+        <View style={{ padding: space[4] }}>
+          <Callout title="Connect your Ghost site">
+            Add your site address and an Admin API key to see and edit your posts here.
+          </Callout>
         </View>
       );
     }
-
-    // Only show "No posts" if genuinely empty (no drafts, no api posts)
-    if (sections.length === 0) {
-      return (
-        <View style={styles.emptyState}>
-          <View style={styles.emptyIconContainer}>
-            <Ionicons name="document-text-outline" size={48} color={colors.text.tertiary} />
-          </View>
-          <Text style={styles.emptyTitle}>No posts yet</Text>
-          <Text style={styles.emptySubtitle}>
-            Create your first post to get started
-          </Text>
-        </View>
-      );
-    }
-
-    return null;
+    const copy = {
+      drafts: ['Nothing in progress', 'Start a new post. Drafts save on your phone as you type.'],
+      scheduled: ['Nothing scheduled', 'Pick a date and time when you publish to schedule a post.'],
+      published: ['No published posts yet', 'Your published posts will appear here.'],
+    }[tab];
+    return (
+      <View style={{ paddingHorizontal: space[4], paddingVertical: space[7], gap: space[2] }}>
+        <Title size="S">{copy[0]}</Title>
+        <Text style={[type.body, { color: t.inkMuted }]}>{copy[1]}</Text>
+      </View>
+    );
   };
 
+  const siteName = site?.title || (connected ? 'Your blog' : 'SpecterPost');
+  const siteHost = site?.url ? site.url.replace(/^https?:\/\//, '').replace(/\/$/, '') : null;
+
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <View style={styles.headerLeft} />
-        <Text style={styles.headerTitle}>All Sheets</Text>
-        <View style={styles.headerActions}>
-          {/* Replaced Search with Settings shortcut for now or keep Search */}
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={() => console.log('Search')}
-          >
-            <Ionicons name="search-outline" size={24} color={colors.text.primary} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={() => navigation.navigate('Editor')}
-          >
-            <Ionicons name="create-outline" size={24} color={colors.text.primary} />
-          </TouchableOpacity>
+    <SafeAreaView style={{ flex: 1, backgroundColor: t.paper }} edges={['top']}>
+      <View style={{ paddingHorizontal: space[4], paddingTop: space[3] }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space[3], flex: 1 }}>
+            {site?.icon ? (
+              <Image source={{ uri: site.icon }} style={{ width: 32, height: 32, borderRadius: radius.sm }} />
+            ) : null}
+            <View style={{ flex: 1 }}>
+              <Label color={t.brick}>{siteHost || 'Ghost publishing'}</Label>
+            </View>
+          </View>
+          <IconButton icon="settings-outline" onPress={() => navigation.navigate('Settings')} accessibilityLabel="Settings" />
         </View>
+        <Title size="L" numberOfLines={2} style={{ marginTop: space[2] }}>
+          {siteName}
+        </Title>
+        {site?.description ? (
+          <Text style={[type.lede, { color: t.inkMuted, fontFamily: 'SourceSerif4_400Regular_Italic', marginTop: space[1] }]} numberOfLines={2}>
+            {site.description}
+          </Text>
+        ) : null}
+        <Tabs
+          style={{ marginTop: space[4] }}
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: 'drafts', label: 'Drafts', count: lists.drafts.length },
+            { value: 'scheduled', label: 'Scheduled', count: lists.scheduled.length },
+            { value: 'published', label: 'Published', count: lists.published.length },
+          ]}
+        />
       </View>
 
+      {connected === false && tab === 'drafts' ? (
+        <Pressable onPress={() => navigation.navigate('Settings')} style={{ margin: space[4], marginBottom: 0 }}>
+          <Callout title="Connect your Ghost site">
+            Writing works offline. To publish, add your site address and an Admin API key. Tap here.
+          </Callout>
+        </Pressable>
+      ) : null}
+
+      {error ? (
+        <Callout kind="error" title="Could not reach your blog" style={{ margin: space[4], marginBottom: 0 }}>
+          {error}
+        </Callout>
+      ) : null}
+
       {loading && !refreshing ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="small" color={colors.text.secondary} />
-        </View>
+        <ActivityIndicator style={{ marginTop: space[7] }} color={t.brick} />
       ) : (
-        <SectionList
-          sections={sections}
-          renderItem={renderPost}
-          renderSectionHeader={renderSectionHeader}
-          keyExtractor={(item) => item.id.toString()}
-          contentContainerStyle={styles.listContent}
+        <FlatList
+          data={data}
+          keyExtractor={(item) => `${item.isLocal ? 'l' : 'r'}-${item.id}`}
+          renderItem={renderItem}
+          ListEmptyComponent={empty}
+          contentContainerStyle={{ paddingBottom: 120 + insets.bottom }}
           refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => loadData(true)}
-              tintColor={colors.text.primary}
-            />
+            <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={t.brick} colors={[t.brick]} />
           }
-          ListEmptyComponent={renderEmptyState}
-          showsVerticalScrollIndicator={false}
-          stickySectionHeadersEnabled={false}
-          ItemSeparatorComponent={() => <View style={styles.separator} />}
         />
       )}
+
+      <View style={{ position: 'absolute', right: space[4], bottom: insets.bottom + space[4] }}>
+        <Pressable
+          accessibilityLabel="Write a new post"
+          onPress={() => {
+            tap();
+            navigation.navigate('Editor', {});
+          }}
+          style={({ pressed }) => ({
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space[2],
+            height: 56,
+            paddingHorizontal: space[5],
+            borderRadius: radius.sm,
+            backgroundColor: pressed ? t.brickDeep : t.brick,
+            elevation: 4,
+            shadowColor: '#000',
+            shadowOpacity: 0.18,
+            shadowRadius: 10,
+            shadowOffset: { width: 0, height: 4 },
+          })}
+        >
+          <Ionicons name="create-outline" size={20} color={t.onBrick} />
+          <Text style={[type.uiSemi, { color: t.onBrick, fontSize: 16 }]}>Write</Text>
+        </Pressable>
+      </View>
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.background,
-  },
-  headerLeft: {
-    width: 60,
-  },
-  headerTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: colors.text.primary,
-    textAlign: 'center',
-    flex: 1,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    width: 60,
-    gap: spacing.sm,
-  },
-  headerButton: {
-    padding: spacing.xs,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  listContent: {
-    paddingHorizontal: spacing.md,
-    paddingBottom: 40,
-  },
-  separator: {
-    height: 1,
-    backgroundColor: colors.border,
-    marginLeft: spacing.lg,
-    opacity: 0.5,
-  },
-  // Section Header
-  sectionHeader: {
-    paddingVertical: spacing.sm,
-    backgroundColor: colors.background,
-    marginTop: spacing.sm,
-  },
-  sectionHeaderText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: colors.text.tertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  // Minimalist Post Row
-  postCard: {
-    paddingVertical: spacing.md,
-    backgroundColor: colors.background,
-    borderRadius: 0, // Flat list style
-    padding: 0,
-    marginBottom: 0,
-    ...Platform.select({
-      ios: { shadowOpacity: 0 },
-      android: { elevation: 0 },
-    }),
-  },
-  postHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  postContent: {
-    flex: 1,
-  },
-  postMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  postTitle: {
-    fontSize: 17, // refined size
-    fontWeight: '600',
-    color: colors.text.primary,
-    marginBottom: 2,
-  },
-  postExcerpt: {
-    fontSize: 15,
-    color: colors.text.tertiary,
-    lineHeight: 20,
-    marginTop: 2,
-  },
-  postDate: {
-    fontSize: 12,
-    color: colors.text.tertiary,
-    marginRight: 8,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginRight: 8,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 4,
-  },
-  statusText: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
-
-  // Empty State
-  emptyState: {
-    flex: 1,
-    paddingTop: 100,
-    alignItems: 'center',
-  },
-  emptyIconContainer: {
-    marginBottom: spacing.md,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.text.secondary,
-    marginTop: spacing.md,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: colors.text.tertiary,
-    marginTop: spacing.xs,
-    textAlign: 'center',
-    paddingHorizontal: 40,
-  },
-  configureButton: {
-    marginTop: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: borderRadius.md,
-    gap: 8,
-  },
-  configureButtonText: {
-    fontSize: 14,
-    color: colors.text.primary,
-  },
-  retryButton: { // Adding missing style from previous code
-    marginTop: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    backgroundColor: colors.accent,
-    borderRadius: borderRadius.md,
-    gap: 8,
-  },
-  retryButtonText: {
-    fontSize: 14,
-    color: colors.text.inverse,
-  },
-
-  // Featured
-  featuredPostCard: {
-    marginBottom: spacing.md,
-    borderRadius: borderRadius.lg, // keep rounded for featured
-    overflow: 'hidden',
-    height: 200,
-    marginTop: spacing.sm,
-  },
-  featuredImageBackground: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  featuredOverlay: {
-    padding: spacing.md,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-  },
-  postTitleFeatured: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#fff',
-  },
-  postDateFeatured: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.8)',
-    marginBottom: 4,
-  },
-  statusBadgeFeatured: {
-    marginBottom: 4,
-  },
-  featuredContent: { // Added wrapper
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-});

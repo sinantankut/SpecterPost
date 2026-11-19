@@ -1,903 +1,604 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
-  ScrollView,
-  StyleSheet,
-  Alert,
-  TouchableOpacity,
-  Modal,
   TextInput,
+  ScrollView,
+  Pressable,
+  Image,
+  Alert,
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  StatusBar,
-  Image,
+  Linking,
+  BackHandler,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, typography, spacing, borderRadius, shadows } from '../constants/theme';
-import { Button } from '../components/Button';
-import { Card } from '../components/Card';
-import { RichTextEditor, TagSelector } from '../components';
-import { saveDraft, getDraftById, getActivePlatform } from '../services/storage';
-import { publishToGhost, updateGhostPost, fetchGhostPostById, createPostOnPlatform, updatePostOnPlatform } from '../services/api';
+import { useFocusEffect } from '@react-navigation/native';
+import { useTheme, type, space, radius, fonts } from '../theme';
+import { Button, IconButton, Label, Sheet, Field, Choice, Callout, Rule, tap } from '../ui';
+import { BodyEditor, EditorToolbar, useMediaInserts, escapeHtml } from '../components/RichTextEditor';
+import { TagSelector } from '../components/TagSelector';
+import { saveDraft, getDraftById, deleteDraft, hasGhostCredentials } from '../services/storage';
+import {
+  fetchGhostPostById,
+  createPostOnPlatform,
+  updatePostOnPlatform,
+  uploadMediaToPlatform,
+} from '../services/api';
 import { pickImageFromGallery } from '../services/imageService';
 import { htmlTemplates } from '../constants/htmlTemplates';
 
+const countWords = (html) => {
+  const text = (html || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text.split(' ').length : 0;
+};
+
+const schedulePresets = () => {
+  const now = new Date();
+  const inOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+  inOneHour.setMinutes(0, 0, 0);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  tomorrow.setHours(9, 0, 0, 0);
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + ((8 - now.getDay()) % 7 || 7));
+  monday.setHours(9, 0, 0, 0);
+  return [
+    { value: 'hour', label: 'In an hour', date: inOneHour },
+    { value: 'tomorrow', label: 'Tomorrow 9:00', date: tomorrow },
+    { value: 'monday', label: 'Monday 9:00', date: monday },
+  ];
+};
+
 export const EditorScreen = ({ navigation, route }) => {
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [featuredImage, setFeaturedImage] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [showTemplates, setShowTemplates] = useState(false);
-  const [showPublishOptions, setShowPublishOptions] = useState(false);
-  const [showMenu, setShowMenu] = useState(false);
-  const [currentDraftId, setCurrentDraftId] = useState(null);
-  const [ghostPostId, setGhostPostId] = useState(null);
-  const [ghostPostStatus, setGhostPostStatus] = useState(null);
-  const [titleFocused, setTitleFocused] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [selectedTags, setSelectedTags] = useState([]);
-  const [publishStatus, setPublishStatus] = useState('draft');
-  const [activePlatform, setActivePlatform] = useState('ghost');
+  const t = useTheme();
   const editorRef = useRef(null);
+  const scrollRef = useRef(null);
+  const media = useMediaInserts(editorRef);
 
-  // Load active platform on mount
-  useEffect(() => {
-    const loadPlatform = async () => {
-      const platform = await getActivePlatform();
-      setActivePlatform(platform);
-    };
-    loadPlatform();
-  }, []);
+  const [ready, setReady] = useState(false);
+  const [initialHtml, setInitialHtml] = useState('');
+  const [title, setTitle] = useState('');
+  const [excerpt, setExcerpt] = useState('');
+  const [content, setContent] = useState('');
+  const [cover, setCover] = useState(null);
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [tags, setTags] = useState([]);
+  const [draftId, setDraftId] = useState(null);
+  const [postId, setPostId] = useState(null);
+  const [postStatus, setPostStatus] = useState(null);
+  const [postUrl, setPostUrl] = useState(null);
+  const [visibility, setVisibility] = useState('public');
+  const [featured, setFeatured] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const [activeFormats, setActiveFormats] = useState([]);
 
+  const [sheet, setSheet] = useState(null); // 'media' | 'link' | 'embed' | 'publish' | 'templates'
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkText, setLinkText] = useState('');
+  const [embedUrl, setEmbedUrl] = useState('');
+  const [publishMode, setPublishMode] = useState('published');
+  const [schedulePreset, setSchedulePreset] = useState('tomorrow');
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState(null);
+  const [connected, setConnected] = useState(true);
+
+  const applyPost = (post) => {
+    setTitle(post.title || '');
+    setExcerpt(post.custom_excerpt || '');
+    setInitialHtml(post.html || '');
+    setContent(post.html || '');
+    setCover(post.feature_image || null);
+    setPostId(post.id);
+    setPostStatus(post.status);
+    setPostUrl(post.url || null);
+    setVisibility(post.visibility || 'public');
+    setFeatured(!!post.featured);
+    setTags((post.tags || []).map((tg) => ({ id: tg.id, name: tg.name, slug: tg.slug })));
+  };
+
+  // Load the post or draft once, then mount the editor with its content.
   useEffect(() => {
-    const loadContent = async () => {
-      // Load Ghost post if ghostPostId is provided
-      if (route.params?.ghostPostId) {
-        setLoading(true);
-        try {
-          // Use passed ghost post data if available, otherwise fetch
-          if (route.params?.ghostPost) {
-            const post = route.params.ghostPost;
-            setTitle(post.title || '');
-            setContent(post.html || post.mobiledoc || '');
-            setFeaturedImage(post.feature_image || null);
-            setGhostPostId(post.id);
-            setGhostPostStatus(post.status);
-            // Load existing tags
-            if (post.tags && post.tags.length > 0) {
-              setSelectedTags(post.tags.map(tag => ({
-                id: tag.id,
-                name: tag.name,
-                slug: tag.slug,
-              })));
-            }
+    (async () => {
+      setConnected(await hasGhostCredentials());
+      try {
+        if (route.params?.ghostPostId) {
+          if (route.params.ghostPost?.html !== undefined) {
+            applyPost(route.params.ghostPost);
           } else {
             const result = await fetchGhostPostById(route.params.ghostPostId);
-            if (result?.post) {
-              const post = result.post;
-              setTitle(post.title || '');
-              setContent(post.html || '');
-              setFeaturedImage(post.feature_image || null);
-              setGhostPostId(post.id);
-              setGhostPostStatus(post.status);
-              // Load existing tags
-              if (post.tags && post.tags.length > 0) {
-                setSelectedTags(post.tags.map(tag => ({
-                  id: tag.id,
-                  name: tag.name,
-                  slug: tag.slug,
-                })));
-              }
-            }
+            if (result?.post) applyPost(result.post);
           }
-        } catch (error) {
-          Alert.alert('Error', 'Failed to load post from Ghost');
-          console.error('Error loading Ghost post:', error);
-        } finally {
-          setLoading(false);
-        }
-      }
-      // Load local draft if draftId is provided
-      else if (route.params?.draftId) {
-        const draft = await getDraftById(route.params.draftId);
-        if (draft) {
-          setTitle(draft.title || '');
-          setContent(draft.content || '');
-          setFeaturedImage(draft.featured_image || null);
-          setCurrentDraftId(draft.id);
-          // Parse tags if stored
-          if (draft.tags) {
-            const parsedTags = typeof draft.tags === 'string' ? JSON.parse(draft.tags) : draft.tags;
-            setSelectedTags(parsedTags || []);
+        } else if (route.params?.draftId) {
+          const d = await getDraftById(route.params.draftId);
+          if (d) {
+            setDraftId(d.id);
+            setTitle(d.title || '');
+            setExcerpt(d.custom_excerpt || '');
+            setInitialHtml(d.content || '');
+            setContent(d.content || '');
+            setCover(d.featured_image || null);
+            setPostId(d.ghost_post_id || null);
+            setTags(Array.isArray(d.tags) ? d.tags : []);
+            setSavedAt(d.updated_at);
           }
         }
+      } catch (e) {
+        Alert.alert('Could not open post', e.message);
+      } finally {
+        setReady(true);
       }
-    };
-    loadContent();
-  }, [route.params?.draftId, route.params?.ghostPostId]);
+    })();
+  }, []);
 
-  const handleSaveDraft = async () => {
-    if (!title.trim() && !content.trim()) {
-      Alert.alert('Error', 'Please add a title or content before saving');
-      return;
-    }
+  // Autosave to the phone a moment after the last change.
+  const persist = useCallback(async () => {
+    if (!title.trim() && !countWords(content) && !cover) return null;
+    const saved = await saveDraft({
+      id: draftId,
+      title,
+      content,
+      featured_image: cover,
+      custom_excerpt: excerpt,
+      tags,
+      platform: 'ghost',
+      ghost_post_id: postId,
+      status: 'draft',
+    });
+    setDraftId(saved.id);
+    setSavedAt(saved.updated_at);
+    setDirty(false);
+    return saved;
+  }, [title, content, cover, excerpt, tags, draftId, postId]);
 
-    setSaving(true);
-    try {
-      const draft = await saveDraft({
-        id: currentDraftId,
-        title,
-        content,
-        featured_image: featuredImage,
-        tags: selectedTags,
-        platform: activePlatform,
-        ghost_post_id: ghostPostId,
-        status: 'draft',
+  useEffect(() => {
+    if (!ready || !dirty) return;
+    const timer = setTimeout(() => {
+      persist().catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [ready, dirty, persist]);
+
+  const markDirty = (setter) => (value) => {
+    setter(value);
+    setDirty(true);
+  };
+
+  const leave = useCallback(async () => {
+    if (dirty) await persist().catch(() => {});
+    navigation.goBack();
+  }, [dirty, persist, navigation]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        leave();
+        return true;
       });
-      setCurrentDraftId(draft.id);
-      Alert.alert('Success', 'Draft saved successfully');
-    } catch (error) {
-      Alert.alert('Error', 'Failed to save draft');
-    } finally {
-      setSaving(false);
+      return () => sub.remove();
+    }, [leave])
+  );
+
+  const pickCover = async () => {
+    try {
+      const img = await pickImageFromGallery();
+      if (!img?.uri) return;
+      setCover(img.uri);
+      setDirty(true);
+      if (connected) {
+        setCoverBusy(true);
+        try {
+          const res = await uploadMediaToPlatform(img.uri, `cover-${Date.now()}.jpg`, 'image', 'image/jpeg');
+          if (res?.url) setCover(res.url);
+        } catch (e) {
+          // Keep the local file; it is uploaded again when publishing.
+        } finally {
+          setCoverBusy(false);
+        }
+      }
+    } catch (e) {
+      Alert.alert('Cover image', e.message);
     }
   };
 
-  const handlePublish = () => {
+  const coverActions = () => {
+    Alert.alert('Cover image', undefined, [
+      { text: 'Replace', onPress: pickCover },
+      { text: 'Remove', style: 'destructive', onPress: () => markDirty(setCover)(null) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const onEditorReady = () => {
+    editorRef.current?.registerToolbar?.((items) => {
+      setActiveFormats(items.map((i) => (typeof i === 'string' ? i : i.type)));
+    });
+  };
+
+  const onCursorPosition = (offsetY) => {
+    // Keep the caret visible above the toolbar while typing.
+    scrollRef.current?.scrollTo({ y: Math.max(offsetY - 40, 0) + 220, animated: true });
+  };
+
+  const insertLink = () => {
+    const url = linkUrl.trim();
+    if (!url) return;
+    const href = /^(https?:|mailto:)/i.test(url) ? url : `https://${url}`;
+    editorRef.current?.insertLink(linkText.trim() || href, href);
+    setSheet(null);
+    setLinkUrl('');
+    setLinkText('');
+  };
+
+  const openPublish = () => {
     if (!title.trim()) {
-      Alert.alert('Error', 'Please add a title before publishing');
+      Alert.alert('Add a title first', 'Every post needs a title before it goes to your site.');
       return;
     }
-    // Set initial status based on whether we're updating
-    setPublishStatus(ghostPostStatus || 'draft');
-    setShowPublishOptions(true);
-  };
-
-  const handlePickFeaturedImage = async () => {
-    try {
-      const result = await pickImageFromGallery();
-      if (result && result.uri) {
-        setFeaturedImage(result.uri);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to select image');
+    if (!connected) {
+      Alert.alert('Connect your site', 'Add your Ghost site in Settings to publish. Your draft is saved on this phone.', [
+        { text: 'Later', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => navigation.navigate('Settings') },
+      ]);
+      return;
     }
+    setPublishError(null);
+    setPublishMode(postStatus === 'scheduled' ? 'scheduled' : postStatus === 'draft' ? 'published' : 'published');
+    setSheet('publish');
   };
 
   const executePublish = async () => {
     setPublishing(true);
-    setShowPublishOptions(false);
-
-    const isUpdate = !!ghostPostId;
-    const platformLabel = activePlatform === 'wordpress' ? 'WordPress' : 'Ghost';
+    setPublishError(null);
+    const status = publishMode;
+    const preset = schedulePresets().find((p) => p.value === schedulePreset);
+    const options = {
+      tags,
+      feature_image: cover,
+      custom_excerpt: excerpt.trim() || null,
+      visibility,
+      featured,
+    };
+    if (status === 'scheduled') options.published_at = preset.date.toISOString();
 
     try {
       let result;
-
-      if (isUpdate) {
-        // Update existing post with tags
-        result = await updatePostOnPlatform(ghostPostId, {
-          title,
-          content,
-          status: publishStatus,
-          tags: selectedTags,
-          feature_image: featuredImage,
-        });
+      if (postId) {
+        result = await updatePostOnPlatform(postId, { title, content, status, ...options });
       } else {
-        // Create new post with tags
-        result = await createPostOnPlatform(title, content, publishStatus, {
-          tags: selectedTags,
-          feature_image: featuredImage,
-        });
+        result = await createPostOnPlatform(title, content, status, options);
       }
-
-      Alert.alert(
-        'Success',
-        isUpdate
-          ? `Post updated on ${platformLabel}!`
-          : `Post created on ${platformLabel}! Slug: ${result.slug || 'N/A'}`,
-        [
-          {
-            text: 'OK',
-            onPress: () => navigation.goBack(),
-          },
-        ]
-      );
-    } catch (error) {
-      Alert.alert('Error', error.message || `Failed to ${isUpdate ? 'update' : 'publish'}`);
+      if (draftId) await deleteDraft(draftId).catch(() => {});
+      const post = result?.post;
+      setSheet(null);
+      setDirty(false);
+      const verb = status === 'published' ? 'Published' : status === 'scheduled' ? 'Scheduled' : 'Saved to your site';
+      const buttons = [{ text: 'Done', onPress: () => navigation.goBack() }];
+      if (post?.url && status === 'published') {
+        buttons.unshift({ text: 'View post', onPress: () => { Linking.openURL(post.url); navigation.goBack(); } });
+      }
+      Alert.alert(verb, post?.title || title, buttons);
+    } catch (e) {
+      setPublishError(e.message || 'Publishing failed');
     } finally {
       setPublishing(false);
     }
   };
 
-  // ... (insertTemplate, renderTemplateModal unchanged)
+  const words = countWords(content);
+  const minutes = Math.max(1, Math.round(words / 230));
+  const statusText = media.uploading
+    ? `${media.uploading}…`
+    : dirty
+      ? 'Editing'
+      : savedAt
+        ? 'Saved on phone'
+        : postStatus === 'published'
+          ? 'Published'
+          : postStatus
+            ? postStatus
+            : 'New post';
 
-  const insertTemplate = (template) => {
-    // Append template HTML to content
-    const newContent = content + '\n\n' + template.template;
-    setContent(newContent);
-    setShowTemplates(false);
-  };
+  const mediaOptions = [
+    { key: 'photo', icon: 'image-outline', label: 'Photo', run: media.imageFromLibrary },
+    { key: 'camera', icon: 'camera-outline', label: 'Camera', run: media.imageFromCamera },
+    { key: 'video', icon: 'film-outline', label: 'Video', run: media.videoFromLibrary },
+    { key: 'record', icon: 'videocam-outline', label: 'Record', run: media.videoFromCamera },
+    { key: 'audio', icon: 'musical-notes-outline', label: 'Audio', run: media.audio },
+    { key: 'file', icon: 'document-attach-outline', label: 'File', run: media.file },
+    { key: 'embed', icon: 'logo-youtube', label: 'Embed', run: () => setTimeout(() => setSheet('embed'), 250) },
+    { key: 'paste', icon: 'clipboard-outline', label: 'Paste image', run: media.imageFromClipboard },
+    { key: 'code', icon: 'code-slash-outline', label: 'Templates', run: () => setTimeout(() => setSheet('templates'), 250) },
+  ];
 
-  const renderTemplateModal = () => (
-    <Modal
-      visible={showTemplates}
-      animationType="slide"
-      transparent={true}
-      onRequestClose={() => setShowTemplates(false)}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>HTML Templates</Text>
-            <TouchableOpacity
-              onPress={() => setShowTemplates(false)}
-              style={styles.modalCloseButton}
-            >
-              <Ionicons name="close" size={24} color={colors.text.primary} />
-            </TouchableOpacity>
-          </View>
-          <ScrollView style={styles.templateList}>
-            {htmlTemplates.map((template) => (
-              <Card
-                key={template.id}
-                style={styles.templateCard}
-                onPress={() => insertTemplate(template)}
-              >
-                <View style={styles.templateHeader}>
-                  <View style={styles.templateIconContainer}>
-                    <Ionicons
-                      name={
-                        template.category === 'visualization'
-                          ? 'bar-chart-outline'
-                          : template.category === 'stats'
-                            ? 'stats-chart-outline'
-                            : 'code-outline'
-                      }
-                      size={22}
-                      color={colors.accent}
-                    />
-                  </View>
-                  <View style={styles.templateInfo}>
-                    <Text style={styles.templateName}>{template.name}</Text>
-                    <Text style={styles.templateDescription}>
-                      {template.description}
-                    </Text>
-                  </View>
-                  <Ionicons
-                    name="chevron-forward"
-                    size={20}
-                    color={colors.text.tertiary}
-                  />
-                </View>
-              </Card>
-            ))}
-          </ScrollView>
-        </View>
-      </View>
-    </Modal>
-  );
-
-  const renderPublishOptionsModal = () => {
-    const isUpdate = !!ghostPostId;
-    const platformLabel = activePlatform === 'wordpress' ? 'WordPress' : 'Ghost';
-
+  if (!ready) {
     return (
-      <Modal
-        visible={showPublishOptions}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowPublishOptions(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
-          <View style={styles.publishModalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>
-                {isUpdate ? 'Update Post' : 'Publish Post'}
-              </Text>
-              <TouchableOpacity
-                onPress={() => setShowPublishOptions(false)}
-                style={styles.modalCloseButton}
-              >
-                <Ionicons name="close" size={24} color={colors.text.primary} />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView
-              style={styles.publishOptionsScroll}
-              keyboardShouldPersistTaps="handled"
-            >
-              {/* Platform indicator */}
-              <View style={styles.publishSection}>
-                <View style={styles.platformIndicator}>
-                  <Ionicons
-                    name={activePlatform === 'wordpress' ? 'logo-wordpress' : 'newspaper-outline'}
-                    size={20}
-                    color={colors.accent}
-                  />
-                  <Text style={styles.platformLabel}>Publishing to {platformLabel}</Text>
-                </View>
-              </View>
-
-              {/* Featured Image Section */}
-              <View style={styles.publishSection}>
-                <Text style={styles.publishSectionLabel}>Featured Image</Text>
-                <TouchableOpacity onPress={handlePickFeaturedImage} style={styles.featuredImageSelector}>
-                  {featuredImage ? (
-                    <Image source={{ uri: featuredImage }} style={styles.featuredImagePreview} />
-                  ) : (
-                    <View style={styles.featuredImagePlaceholder}>
-                      <Ionicons name="image-outline" size={32} color={colors.text.tertiary} />
-                      <Text style={styles.featuredImageText}>Tap to add cover image</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              </View>
-
-              {/* Status selector */}
-              <View style={styles.publishSection}>
-                <Text style={styles.publishSectionLabel}>Post Status</Text>
-                <View style={styles.statusOptions}>
-                  <TouchableOpacity
-                    style={[
-                      styles.statusOption,
-                      publishStatus === 'draft' && styles.statusOptionActive,
-                    ]}
-                    onPress={() => setPublishStatus('draft')}
-                  >
-                    <Ionicons
-                      name="document-outline"
-                      size={18}
-                      color={publishStatus === 'draft' ? colors.accent : colors.text.tertiary}
-                    />
-                    <Text style={[
-                      styles.statusOptionText,
-                      publishStatus === 'draft' && styles.statusOptionTextActive,
-                    ]}>
-                      Draft
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.statusOption,
-                      publishStatus === 'published' && styles.statusOptionActive,
-                    ]}
-                    onPress={() => setPublishStatus('published')}
-                  >
-                    <Ionicons
-                      name="globe-outline"
-                      size={18}
-                      color={publishStatus === 'published' ? colors.accent : colors.text.tertiary}
-                    />
-                    <Text style={[
-                      styles.statusOptionText,
-                      publishStatus === 'published' && styles.statusOptionTextActive,
-                    ]}>
-                      Published
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Tags section */}
-              <View style={styles.publishSection}>
-                <Text style={styles.publishSectionLabel}>Tags</Text>
-                <TagSelector
-                  selectedTags={selectedTags}
-                  onTagsChange={setSelectedTags}
-                  placeholder="Search or add tags..."
-                  maxTags={10}
-                />
-              </View>
-            </ScrollView>
-
-            {/* Action buttons */}
-            <View style={styles.publishActions}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setShowPublishOptions(false)}
-              >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.confirmPublishButton, publishing && styles.confirmPublishButtonDisabled]}
-                onPress={executePublish}
-                disabled={publishing}
-              >
-                <Text style={styles.confirmPublishButtonText}>
-                  {publishing ? 'Publishing...' : (isUpdate ? 'Update' : 'Publish')}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      <SafeAreaView style={{ flex: 1, backgroundColor: t.paper, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator color={t.brick} />
+      </SafeAreaView>
     );
-  };
-
-  const [wordCount, setWordCount] = useState(0);
-
-  const countWords = (str) => {
-    if (!str) return 0;
-    const text = str.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    return text.length > 0 ? text.split(' ').length : 0;
-  };
-
-  const renderMenuModal = () => (
-    <Modal
-      visible={showMenu}
-      animationType="fade"
-      transparent={true}
-      onRequestClose={() => setShowMenu(false)}
-    >
-      <TouchableOpacity
-        style={styles.menuOverlay}
-        activeOpacity={1}
-        onPress={() => setShowMenu(false)}
-      >
-        <View style={styles.menuContent}>
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              handleSaveDraft();
-            }}
-          >
-            <Ionicons name="save-outline" size={20} color={colors.text.primary} />
-            <Text style={styles.menuItemText}>Save Draft</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              setShowPublishOptions(true);
-            }}
-          >
-            <Ionicons name="globe-outline" size={20} color={colors.text.primary} />
-            <Text style={styles.menuItemText}>Publish</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              setShowTemplates(true);
-            }}
-          >
-            <Ionicons name="code-outline" size={20} color={colors.text.primary} />
-            <Text style={styles.menuItemText}>Insert Template</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              handlePickFeaturedImage();
-            }}
-          >
-            <Ionicons name="image-outline" size={20} color={colors.text.primary} />
-            <Text style={styles.menuItemText}>Set Featured Image</Text>
-          </TouchableOpacity>
-
-          <View style={styles.menuDivider} />
-
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              Alert.alert(
-                'Discard Draft',
-                'Are you sure you want to discard this draft?',
-                [
-                  { text: 'Cancel', style: 'cancel' },
-                  {
-                    text: 'Discard',
-                    style: 'destructive',
-                    onPress: () => navigation.goBack()
-                  },
-                ]
-              );
-            }}
-          >
-            <Ionicons name="trash-outline" size={20} color={colors.error || '#FF3B30'} />
-            <Text style={[styles.menuItemText, { color: colors.error || '#FF3B30' }]}>Discard</Text>
-          </TouchableOpacity>
-        </View>
-      </TouchableOpacity>
-    </Modal>
-  );
-
-  // Auto-save timer ref
-  const autoSaveTimerRef = useRef(null);
-
-  const handleContentChange = useCallback((html) => {
-    setContent(html);
-    setWordCount(countWords(html));
-
-    // Clear existing timer
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-    }
-
-    // Set new timer for auto-save (save after 2 seconds of no typing)
-    autoSaveTimerRef.current = setTimeout(async () => {
-      if (html.trim() || title.trim()) {
-        try {
-          const draft = await saveDraft({
-            id: currentDraftId,
-            title,
-            content: html,
-            featured_image: featuredImage,
-            tags: selectedTags,
-            platform: activePlatform,
-            ghost_post_id: ghostPostId,
-            status: 'draft',
-          });
-          setCurrentDraftId(draft.id);
-          console.log('Auto-saved draft');
-        } catch (error) {
-          console.error('Auto-save failed:', error);
-        }
-      }
-    }, 2000);
-  }, [title, featuredImage, selectedTags, activePlatform, ghostPostId, currentDraftId]);
-
-  // Auto-save on title change
-  useEffect(() => {
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-    }
-
-    if (title.trim() || content.trim()) {
-      autoSaveTimerRef.current = setTimeout(async () => {
-        try {
-          const draft = await saveDraft({
-            id: currentDraftId,
-            title,
-            content,
-            featured_image: featuredImage,
-            tags: selectedTags,
-            platform: activePlatform,
-            ghost_post_id: ghostPostId,
-            status: 'draft',
-          });
-          setCurrentDraftId(draft.id);
-          console.log('Auto-saved draft (title change)');
-        } catch (error) {
-          console.error('Auto-save failed:', error);
-        }
-      }, 2000);
-    }
-
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-      }
-    };
-  }, [title, content, featuredImage, selectedTags, activePlatform, ghostPostId, currentDraftId]);
+  }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-    >
-      {/* Radical Minimalist Header - Single Line */}
-      <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => setShowMenu(true)}
-          style={styles.headerButton}
+    <SafeAreaView style={{ flex: 1, backgroundColor: t.paper }} edges={['top', 'bottom']}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        {/* Top bar */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingHorizontal: space[2],
+            paddingVertical: space[2],
+            gap: space[2],
+            borderBottomWidth: 1,
+            borderBottomColor: t.rule,
+          }}
         >
-          <Ionicons name="ellipsis-vertical" size={24} color={colors.text.primary} />
-        </TouchableOpacity>
+          <IconButton icon="arrow-back" onPress={leave} accessibilityLabel="Back" />
+          <View style={{ flex: 1 }}>
+            <Text style={[type.label, { color: media.uploading ? t.brick : t.inkMuted, fontSize: 11 }]} numberOfLines={1}>
+              {statusText}
+            </Text>
+            <Text style={[type.caption, { color: t.inkFaint }]}>
+              {words} words · {minutes} min read
+            </Text>
+          </View>
+          <Button
+            compact
+            title={postStatus === 'published' ? 'Update' : 'Publish'}
+            onPress={openPublish}
+            disabled={!!media.uploading}
+          />
+        </View>
 
-        <Text style={styles.headerTitle}>
-          {wordCount} words
-        </Text>
-      </View>
+        <ScrollView ref={scrollRef} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: space[6] }}>
+          {/* Cover */}
+          {cover ? (
+            <Pressable onPress={coverActions}>
+              <Image source={{ uri: cover }} style={{ width: '100%', aspectRatio: 3 / 2, backgroundColor: t.paperSunken }} resizeMode="cover" />
+              {coverBusy ? (
+                <View style={{ position: 'absolute', right: space[3], bottom: space[3], backgroundColor: t.ink, paddingHorizontal: space[3], paddingVertical: space[1] }}>
+                  <Text style={[type.caption, { color: t.paper }]}>Uploading…</Text>
+                </View>
+              ) : null}
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={pickCover}
+              style={({ pressed }) => ({
+                marginHorizontal: space[4],
+                marginTop: space[4],
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space[2],
+                paddingVertical: space[2],
+                opacity: pressed ? 0.6 : 1,
+              })}
+            >
+              <Ionicons name="image-outline" size={18} color={t.inkMuted} />
+              <Text style={[type.uiSemi, { color: t.inkMuted }]}>Add cover image</Text>
+            </Pressable>
+          )}
 
-      {/* Editor Area - Full Screen Edge-to-Edge */}
-      <View style={styles.editorContainer}>
-        {/* Title Input as part of the canvas */}
-        <TextInput
-          style={styles.titleInput}
-          placeholder="Title"
-          placeholderTextColor={colors.text.tertiary}
-          value={title}
-          onChangeText={setTitle}
-          multiline
-          scrollEnabled={false}
+          {/* Title and subtitle */}
+          <TextInput
+            value={title}
+            onChangeText={markDirty(setTitle)}
+            placeholder="Title"
+            placeholderTextColor={t.inkFaint}
+            selectionColor={t.brick}
+            multiline
+            scrollEnabled={false}
+            style={[type.titleL, { color: t.ink, paddingHorizontal: space[4], paddingTop: space[4], paddingBottom: space[1] }]}
+          />
+          <TextInput
+            value={excerpt}
+            onChangeText={markDirty(setExcerpt)}
+            placeholder="Subtitle (optional)"
+            placeholderTextColor={t.inkFaint}
+            selectionColor={t.brick}
+            multiline
+            scrollEnabled={false}
+            maxLength={300}
+            style={[type.lede, { fontFamily: fonts.serifItalic, color: t.inkMuted, paddingHorizontal: space[4], paddingBottom: space[3] }]}
+          />
+          <Rule style={{ marginHorizontal: space[4], marginBottom: space[4] }} />
+
+          <BodyEditor
+            ref={editorRef}
+            initialContent={initialHtml}
+            onChange={(html) => {
+              setContent(html);
+              setDirty(true);
+            }}
+            onCursorPosition={onCursorPosition}
+            editorInitializedCallback={onEditorReady}
+          />
+        </ScrollView>
+
+        <EditorToolbar
+          editorRef={editorRef}
+          activeFormats={activeFormats}
+          onMedia={() => {
+            tap();
+            setSheet('media');
+          }}
+          onLink={() => setSheet('link')}
         />
+      </KeyboardAvoidingView>
 
-        <RichTextEditor
-          ref={editorRef}
-          initialContent={content}
-          onContentChange={handleContentChange}
-          placeholder="Start writing..."
-          minHeight="100%"
-        />
-      </View>
+      {/* Media picker */}
+      <Sheet visible={sheet === 'media'} onClose={() => setSheet(null)} title="Insert">
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: space[3], paddingBottom: space[2] }}>
+          {mediaOptions.map((o) => (
+            <Pressable
+              key={o.key}
+              onPress={() => {
+                tap();
+                setSheet(null);
+                o.run();
+              }}
+              style={({ pressed }) => ({
+                width: '33.33%',
+                alignItems: 'center',
+                gap: space[2],
+                paddingVertical: space[4],
+                backgroundColor: pressed ? t.paperSunken : 'transparent',
+              })}
+            >
+              <View style={{ width: 52, height: 52, alignItems: 'center', justifyContent: 'center', backgroundColor: t.paperRaised, borderWidth: 1, borderColor: t.rule, borderRadius: radius.sm }}>
+                <Ionicons name={o.icon} size={24} color={t.ink} />
+              </View>
+              <Text style={[type.caption, { color: t.ink }]}>{o.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        {!connected ? (
+          <Callout kind="caveat" style={{ marginHorizontal: space[4] }}>
+            Not connected to a site. Photos are kept in the draft; video, audio and files need a connection.
+          </Callout>
+        ) : null}
+      </Sheet>
 
-      {renderMenuModal()}
-      {renderTemplateModal()}
-      {renderPublishOptionsModal()}
-    </KeyboardAvoidingView>
+      {/* Link */}
+      <Sheet
+        visible={sheet === 'link'}
+        onClose={() => setSheet(null)}
+        title="Add link"
+        footer={<Button title="Insert link" onPress={insertLink} disabled={!linkUrl.trim()} />}
+      >
+        <View style={{ paddingHorizontal: space[4], gap: space[3] }}>
+          <Field label="Address" placeholder="https://" value={linkUrl} onChangeText={setLinkUrl} autoCapitalize="none" keyboardType="url" autoFocus />
+          <Field label="Text" placeholder="Shown in the post (optional)" value={linkText} onChangeText={setLinkText} />
+        </View>
+      </Sheet>
+
+      {/* Embed */}
+      <Sheet
+        visible={sheet === 'embed'}
+        onClose={() => setSheet(null)}
+        title="Embed"
+        footer={
+          <Button
+            title="Embed"
+            disabled={!embedUrl.trim()}
+            onPress={() => {
+              media.embed(embedUrl);
+              setEmbedUrl('');
+              setSheet(null);
+            }}
+          />
+        }
+      >
+        <View style={{ paddingHorizontal: space[4], gap: space[3] }}>
+          <Field
+            label="Link"
+            placeholder="YouTube, Vimeo or any web address"
+            value={embedUrl}
+            onChangeText={setEmbedUrl}
+            autoCapitalize="none"
+            keyboardType="url"
+            autoFocus
+            hint="YouTube and Vimeo links become players. Other links are inserted as a link."
+          />
+        </View>
+      </Sheet>
+
+      {/* Templates */}
+      <Sheet visible={sheet === 'templates'} onClose={() => setSheet(null)} title="Templates">
+        <ScrollView style={{ maxHeight: 420 }}>
+          {htmlTemplates.map((tpl, i) => (
+            <Pressable
+              key={tpl.id}
+              onPress={() => {
+                editorRef.current?.insertHTML(tpl.template);
+                setSheet(null);
+              }}
+              style={({ pressed }) => ({
+                paddingHorizontal: space[4],
+                paddingVertical: space[3],
+                borderTopWidth: i ? 1 : 0,
+                borderTopColor: t.rule,
+                backgroundColor: pressed ? t.paperSunken : 'transparent',
+              })}
+            >
+              <Text style={[type.uiSemi, { color: t.ink }]}>{tpl.name}</Text>
+              <Text style={[type.caption, { color: t.inkMuted }]}>{tpl.description}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </Sheet>
+
+      {/* Publish */}
+      <Sheet
+        visible={sheet === 'publish'}
+        onClose={() => setSheet(null)}
+        title={postId ? 'Update post' : 'Publish'}
+        footer={
+          <Button
+            title={
+              publishMode === 'published'
+                ? postStatus === 'published' ? 'Update now' : 'Publish now'
+                : publishMode === 'scheduled'
+                  ? 'Schedule'
+                  : 'Save to site as draft'
+            }
+            loading={publishing}
+            onPress={executePublish}
+          />
+        }
+      >
+        <ScrollView style={{ maxHeight: 520 }} contentContainerStyle={{ paddingHorizontal: space[4], gap: space[5], paddingBottom: space[2] }} keyboardShouldPersistTaps="handled">
+          <View style={{ gap: space[2] }}>
+            <Label>When</Label>
+            <Choice
+              value={publishMode}
+              onChange={setPublishMode}
+              options={[
+                { value: 'published', label: 'Now', icon: 'flash-outline' },
+                { value: 'scheduled', label: 'Schedule', icon: 'time-outline' },
+                { value: 'draft', label: 'Keep as draft', icon: 'document-outline' },
+              ]}
+            />
+            {publishMode === 'scheduled' ? (
+              <View style={{ gap: space[2], marginTop: space[2] }}>
+                <Choice value={schedulePreset} onChange={setSchedulePreset} options={schedulePresets().map(({ value, label }) => ({ value, label }))} />
+                <Text style={[type.caption, { color: t.inkMuted }]}>
+                  Goes live {schedulePresets().find((p) => p.value === schedulePreset)?.date.toLocaleString(undefined, { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          <View style={{ gap: space[2] }}>
+            <Label>Who can read it</Label>
+            <Choice
+              value={visibility}
+              onChange={setVisibility}
+              options={[
+                { value: 'public', label: 'Everyone' },
+                { value: 'members', label: 'Members' },
+                { value: 'paid', label: 'Paid members' },
+              ]}
+            />
+          </View>
+
+          <View style={{ gap: space[2] }}>
+            <Label>Tags</Label>
+            <TagSelector selectedTags={tags} onTagsChange={markDirty(setTags)} />
+          </View>
+
+          <Pressable onPress={() => setFeatured((f) => !f)} style={{ flexDirection: 'row', alignItems: 'center', gap: space[3] }}>
+            <Ionicons name={featured ? 'checkbox' : 'square-outline'} size={22} color={featured ? t.brick : t.inkMuted} />
+            <Text style={[type.ui, { color: t.ink }]}>Feature this post</Text>
+          </Pressable>
+
+          {publishError ? <Callout kind="error" title="Not published">{publishError}</Callout> : null}
+        </ScrollView>
+      </Sheet>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: spacing.md,
-    paddingTop: (Platform?.OS === 'android') ? ((StatusBar?.currentHeight || 24) + 4) : spacing.sm,
-    paddingBottom: spacing.xs,
-    backgroundColor: colors.background,
-  },
-  // ... (rest of styles preserved from view, adding featuredImage styles)
-  featuredImageSelector: {
-    height: 150,
-    borderRadius: borderRadius.md,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderStyle: 'dashed',
-    overflow: 'hidden',
-  },
-  featuredImagePreview: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
-  featuredImagePlaceholder: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-  },
-  featuredImageText: {
-    fontSize: typography.sizes.sm,
-    color: colors.text.tertiary,
-  },
-  headerTitle: {
-    fontSize: 13,
-    color: '#8E8E93', // Specific requirement
-    fontWeight: '500',
-    opacity: 0.8,
-  },
-  headerButton: {
-    width: 40,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Editor
-  editorContainer: {
-    flex: 1,
-    paddingHorizontal: 16, // "Add significant padding to the left/right (16dp)"
-  },
-  titleInput: {
-    fontSize: 24, // H1 equivalent
-    fontWeight: 'bold',
-    color: colors.text.primary,
-    marginBottom: spacing.md,
-    marginTop: spacing.sm,
-    fontFamily: (Platform?.OS === 'ios') ? 'System' : 'Roboto',
-    padding: 0,
-  },
-  // Modals... (reuse existing or simplify)
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  // ... rest of modal styles
-  modalContent: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: borderRadius.xl,
-    borderTopRightRadius: borderRadius.xl,
-    maxHeight: '80%',
-    ...shadows.lg,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  modalTitle: {
-    fontSize: typography.sizes.xl,
-    fontWeight: typography.weights.semibold,
-    color: colors.text.primary,
-  },
-  modalCloseButton: {
-    width: 36,
-    height: 36,
-    borderRadius: borderRadius.full,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-  },
-  templateList: {
-    padding: spacing.md,
-  },
-  templateCard: {
-    marginBottom: spacing.sm,
-    padding: spacing.md,
-  },
-  templateHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  templateIconContainer: {
-    width: 44,
-    height: 44,
-    borderRadius: borderRadius.md,
-    backgroundColor: `${colors.accent}15`,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  templateInfo: {
-    marginLeft: spacing.md,
-    flex: 1,
-  },
-  templateName: {
-    fontSize: typography.sizes.base,
-    fontWeight: typography.weights.semibold,
-    color: colors.text.primary,
-    marginBottom: spacing.xs,
-  },
-  templateDescription: {
-    fontSize: typography.sizes.sm,
-    color: colors.text.secondary,
-    lineHeight: typography.sizes.sm * 1.4,
-  },
-  // Publish Options Modal styles
-  publishModalContent: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: borderRadius.xl,
-    borderTopRightRadius: borderRadius.xl,
-    maxHeight: '85%',
-    ...shadows.lg,
-  },
-  publishOptionsScroll: {
-    paddingHorizontal: spacing.lg,
-    maxHeight: 400,
-  },
-  publishSection: {
-    marginBottom: spacing.lg,
-  },
-  publishSectionLabel: {
-    fontSize: typography.sizes.sm,
-    fontWeight: typography.weights.semibold,
-    color: colors.text.secondary,
-    marginBottom: spacing.sm,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  platformIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: spacing.sm,
-    backgroundColor: `${colors.accent}10`,
-    borderRadius: borderRadius.md,
-    gap: spacing.sm,
-  },
-  platformLabel: {
-    fontSize: typography.sizes.sm,
-    color: colors.accent,
-    fontWeight: typography.weights.medium,
-  },
-  statusOptions: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  statusOption: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.sm,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    gap: spacing.xs,
-  },
-  statusOptionActive: {
-    backgroundColor: `${colors.accent}10`,
-    borderColor: colors.accent,
-  },
-  statusOptionText: {
-    fontSize: typography.sizes.sm,
-    color: colors.text.tertiary,
-    fontWeight: typography.weights.medium,
-  },
-  statusOptionTextActive: {
-    color: colors.accent,
-  },
-  publishActions: {
-    flexDirection: 'row',
-    padding: spacing.lg,
-    gap: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  cancelButton: {
-    flex: 1,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cancelButtonText: {
-    fontSize: typography.sizes.base,
-    color: colors.text.secondary,
-    fontWeight: typography.weights.medium,
-  },
-  confirmPublishButton: {
-    flex: 2,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.md,
-    backgroundColor: colors.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  confirmPublishButtonDisabled: {
-    backgroundColor: colors.text.tertiary,
-  },
-  confirmPublishButtonText: {
-    fontSize: typography.sizes.base,
-    color: colors.text.inverse,
-    fontWeight: typography.weights.semibold,
-  },
-  // Menu styles
-  menuOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'flex-start',
-    alignItems: 'flex-end',
-    paddingTop: (Platform?.OS === 'android') ? ((StatusBar?.currentHeight || 24) + 50) : 90,
-    paddingRight: spacing.md,
-  },
-  menuContent: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    minWidth: 200,
-    ...shadows.lg,
-    overflow: 'hidden',
-  },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    gap: spacing.sm,
-  },
-  menuItemText: {
-    fontSize: typography.sizes.base,
-    color: colors.text.primary,
-    fontWeight: typography.weights.medium,
-  },
-  menuDivider: {
-    height: 1,
-    backgroundColor: colors.border,
-    marginVertical: spacing.xs,
-  },
-});
