@@ -5,6 +5,9 @@ on:
     branches: [master, 'claude/**']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,6 +28,20 @@ jobs:
       - name: Build release APK (debug-signed, for sideloading)
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk SpecterPost-${{ github.run_number }}.apk
+      - name: Publish as a pre-release (direct download link for sideloading)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-build-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: SpecterPost Android build ${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          body: |
+            Debug-signed APK for sideloading, built from ${{ github.ref_name }} @ ${{ github.sha }}.
+            On Android: open this page on the phone, download the APK, allow "Install unknown apps" for your browser, then install.
+          files: SpecterPost-${{ github.run_number }}.apk
       - uses: actions/upload-artifact@v4
         with:
           name: specterpost-apk
